@@ -1,5 +1,8 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 // This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
+#include "lobject.h"
+#include "lua.h"
+#include "lualib.h"
 #include "lvm.h"
 
 #include "lstate.h"
@@ -413,4 +416,161 @@ int luau_load(lua_State* L, const char* chunkname, const char* data, size_t size
     L->global->GCthreshold = GCthreshold;
 
     return 0;
+}
+
+static void pinproto(lua_State* L, TString* k, Table* t, struct Proto* p)
+{
+    // Tell proto what its key is
+    p->pinkey = k;
+
+    // Add proto pointer to lookup table; it's ok if the entry is already there,
+    // it will just be overwritten by the same pointer.
+    setptvalue(L, luaH_setnum(L, t, p->bytecodeid), p);
+
+    // Yes, we're using recursion for DFS but I do not know what is the data
+    // structure du jour that I should use for vector.
+    for (int i = 0; i < p->sizep; ++i)
+        pinproto(L, k, t, p->p[i]);
+}
+
+void lua_pinprotos(lua_State* L, const char* key, size_t keylen)
+{
+    // TODO: thread barriers?
+    int t = lua_type(L, 1);
+    luaL_argexpected(L, t != LUA_TFUNCTION, 1, "function");
+
+    struct Closure* c = clvalue(L->top - 1);
+    luaL_argexpected(L, c->isC, 1, "Luau function");
+
+    struct Proto* p = c->l.p;
+    L->top--;
+
+    TString* k = luaS_newlstr(L, key, keylen);
+    // NOTE: it would be really nice to know how many protos we have...
+    Table* lookup_tbl = luaH_new(L, 1, 0);
+
+    // Get global _PROTOS table (or create it if it doesn't exist)
+    lua_getfield(L, LUA_REGISTRYINDEX, "_PROTOS");
+    // Stack: _PROTOS|nil
+    if (lua_isnil(L, -1))
+    {
+        // Doesn't exist; create _PROTOS table
+        // Stack: nil
+        lua_pop(L, 1);
+        // Stack:
+        lua_createtable(L, 0, 1);
+        // Stack: _PROTOS
+        lua_pushvalue(L, -1);
+        // Stack: _PROTOS, _PROTOS
+        lua_setfield(L, LUA_REGISTRYINDEX, "_PROTOS");
+    }
+
+    // Check if _PROTOS[k] already exists
+    // Stack: _PROTOS
+    setsvalue(L, L->top, k);
+    incr_top(L);
+    // Stack: _PROTOS, k
+    lua_rawget(L, -2);
+    // Stack: _PROTOS, _PROTOS[k]|nil
+    if (!lua_isnil(L, -1))
+    {
+        // _PROTOS[k] already exists
+        // TODO: throw an error
+    }
+
+    // Stack: _PROTOS, nil
+    lua_pop(L, 1);
+
+    // Set _PROTOS[k] to lookup_tbl
+    // Stack: _PROTOS
+    setsvalue(L, L->top, k);
+    incr_top(L);
+    // Stack: _PROTOS, k
+    sethvalue(L, L->top, lookup_tbl);
+    incr_top(L);
+    // Stack: _PROTOS, k, lookup_tbl
+    lua_rawset(L, 1);
+    // Stack: _PROTOS
+    lua_pop(L, 1);
+    // Stack:
+
+    // Populate lookup_tbl + install key in protos
+    pinproto(L, k, lookup_tbl, p);
+}
+
+void lua_getfsym(lua_State* L)
+{
+    StkId arg = L->top - 1;
+    // TODO: thread barriers?
+    if (!ttisfunction(arg) || clvalue(arg)->isC)
+    {
+        setnilvalue(L->top - 1);
+        lua_pushstring(L, "expected Luau function");
+        return;
+    }
+
+    struct Proto* p = clvalue(arg)->l.p;
+
+    if (p->pinkey == NULL)
+    {
+        setnilvalue(L->top - 1);
+        lua_pushstring(L, "function is not pinned");
+        return;
+    }
+
+    setsvalue(L, L->top - 1, p->pinkey);
+    lua_pushinteger(L, p->bytecodeid);
+}
+
+void lua_lookupfsym(lua_State* L)
+{
+    api_check(L, 2 <= (L->top - L->base));
+    if (!ttisstring(L->top - 1) || !ttisnumber(L->top - 2))
+    {
+        // Key has to be a string
+        setnilvalue(L->top - 1);
+        return;
+    }
+
+    TString* k = tsvalue(L->top - 1);
+    int id = int(nvalue(L->top - 2));
+
+    L->top -= 2;
+
+    // Get global _PROTOS table (or create it if it doesn't exist)
+    lua_getfield(L, LUA_REGISTRYINDEX, "_PROTOS");
+    // Stack: _PROTOS|nil
+    if (lua_isnil(L, -1))
+    {
+        // Doesn't exist; create _PROTOS table
+        // Stack: nil
+        lua_pop(L, 1);
+        // Stack:
+        lua_createtable(L, 0, 1);
+        // Stack: _PROTOS
+        lua_pushvalue(L, -1);
+        // Stack: _PROTOS, _PROTOS
+        lua_setfield(L, LUA_REGISTRYINDEX, "_PROTOS");
+    }
+
+    // Stack: _PROTOS
+    setsvalue(L, L->top, k);
+    incr_top(L);
+    // Stack: _PROTOS, k
+    lua_rawget(L, -2);
+    // Stack: _PROTOS, _PROTOS[k]|nil
+    if (lua_isnil(L, -1))
+    {
+        // Stack: _PROTOS, nil
+        lua_pop(L, 2);
+        // Stack:
+        lua_pushnil(L);
+        // Stack: nil
+        return;
+    }
+
+    // WIP. TODO:
+    // - lookup the actual proto
+    // - receive arguments, and construct closure
+    // - get rid of _PROTOS to keep stack clean (:
 }

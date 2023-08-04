@@ -285,6 +285,8 @@ typedef struct Proto
     TString** upvalues;     // upvalue names
     TString* source;
 
+    TString* pinkey;
+
     TString* debugname;
     uint8_t* debuginsn; // a copy of code[] array with just opcodes
 
