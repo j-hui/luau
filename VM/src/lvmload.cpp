@@ -471,7 +471,7 @@ void lua_registerfkey(lua_State* L, const char* key, size_t keylen)
     lua_pop(L, 1);
     // Stack:
 
-    if (ttisnil(luaH_getstr(protos, k)))
+    if (!ttisnil(luaH_getstr(protos, k)))
     {
         // _PROTOS[k] already exists
         // TODO: throw an error?
@@ -485,7 +485,21 @@ void lua_registerfkey(lua_State* L, const char* key, size_t keylen)
 
 void lua_unregisterfkey(lua_State* L, const char* key, size_t keylen)
 {
-    // TODO: this
+    TString* k = luaS_newlstr(L, key, keylen);
+
+    // Get global _PROTOS table (or create it if it doesn't exist)
+    lua_getfield(L, LUA_REGISTRYINDEX, "_PROTOS");
+    // Stack: _PROTOS|nil
+    if (lua_isnil(L, -1))
+        // Doesn't exist; nothing to do here
+        return;
+
+    // Stack: _PROTOS
+    Table* protos = hvalue(L->top - 1);
+    lua_pop(L, 1);
+    // Stack:
+
+    setnilvalue(luaH_setstr(L, protos, k));
 }
 
 void lua_getfkey(lua_State* L)
