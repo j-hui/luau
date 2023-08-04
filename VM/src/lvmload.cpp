@@ -444,7 +444,7 @@ void lua_registerfkey(lua_State* L, const char* key, size_t keylen)
     luaL_argexpected(L, c->isC, 1, "Luau function");
 
     struct Proto* p = c->l.p;
-    L->top--;
+    lua_pop(L, 1);
 
     TString* k = luaS_newlstr(L, key, keylen);
     // NOTE: it would be really nice to know how many protos we have...
@@ -466,34 +466,18 @@ void lua_registerfkey(lua_State* L, const char* key, size_t keylen)
         lua_setfield(L, LUA_REGISTRYINDEX, "_PROTOS");
     }
 
-    // Check if _PROTOS[k] already exists
     // Stack: _PROTOS
-    setsvalue(L, L->top, k);
-    incr_top(L);
-    // Stack: _PROTOS, k
-    lua_rawget(L, -2);
-    // Stack: _PROTOS, _PROTOS[k]|nil
-    if (!lua_isnil(L, -1))
-    {
-        // _PROTOS[k] already exists
-        // TODO: throw an error
-    }
-
-    // Stack: _PROTOS, nil
-    lua_pop(L, 1);
-
-    // Set _PROTOS[k] to lookup_tbl
-    // Stack: _PROTOS
-    setsvalue(L, L->top, k);
-    incr_top(L);
-    // Stack: _PROTOS, k
-    sethvalue(L, L->top, lookup_tbl);
-    incr_top(L);
-    // Stack: _PROTOS, k, lookup_tbl
-    lua_rawset(L, 1);
-    // Stack: _PROTOS
+    Table* protos = hvalue(L->top - 1);
     lua_pop(L, 1);
     // Stack:
+
+    if (ttisnil(luaH_getstr(protos, k)))
+    {
+        // _PROTOS[k] already exists
+        // TODO: throw an error?
+    }
+
+    sethvalue(L, luaH_setstr(L, protos, k), lookup_tbl);
 
     // Populate lookup_tbl + install key in protos
     pinproto(L, k, lookup_tbl, p);
@@ -548,25 +532,24 @@ void lua_lookupfkey(lua_State* L)
     // Stack: _PROTOS|nil
     if (lua_isnil(L, -1))
     {
-        // Doesn't exist; TODO: throw error
-    }
-
-    // Stack: _PROTOS
-    lua_rawgetfield(L, -1, getstr(k));
-    // Stack: _PROTOS, _PROTOS[k]|nil
-    setobj2s(L, L->top - 2, L->top - 1);
-    L->top--;
-    // Stack: _PROTOS[k]|nil
-    if (lua_isnil(L, -1))
-    {
+        // _PROTOS table doesn't exist; return nil
         // Stack: nil
         return;
     }
-    // Stack: _PROTOS[k]
-    Table* t = hvalue(L->top - 1);
-    L->top--;
+
+    Table* protos = hvalue(L->top - 1);
+    lua_pop(L, 1);
     // Stack:
-    const TValue* v = luaH_getnum(t, i);
+
+    const TValue* v = luaH_getstr(protos, k);
+    if (!ttistable(v))
+    {
+        // Proto table for k for doesn't exist/is wrong type somehow; return nil
+        lua_pushnil(L);
+        return;
+    }
+    Table* lookup_tbl = hvalue(v);
+    v = luaH_getnum(lookup_tbl, i);
     if (ttype(v) != LUA_TPROTO)
     {
         lua_pushnil(L);
