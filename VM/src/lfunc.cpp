@@ -30,6 +30,7 @@ Proto* luaF_newproto(lua_State* L)
     f->sizelocvars = 0;
     f->locvars = NULL;
     f->source = NULL;
+    f->pinkey = NULL;
     f->debugname = NULL;
     f->debuginsn = NULL;
     f->codeentry = NULL;

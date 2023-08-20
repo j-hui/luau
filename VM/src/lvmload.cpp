@@ -1,5 +1,9 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 // This code is based on Lua 5.x implementation licensed under MIT License; see lua_LICENSE.txt for details
+#include "ldo.h"
+#include "lobject.h"
+#include "lua.h"
+#include "lualib.h"
 #include "lvm.h"
 
 #include "lstate.h"
@@ -413,4 +417,162 @@ int luau_load(lua_State* L, const char* chunkname, const char* data, size_t size
     L->global->GCthreshold = GCthreshold;
 
     return 0;
+}
+
+static void pinproto(lua_State* L, TString* k, Table* t, struct Proto* p)
+{
+    // Tell proto what its key is
+    p->pinkey = k;
+
+    // Add proto pointer to lookup table; it's ok if the entry is already there,
+    // it will just be overwritten by the same pointer.
+    setptvalue(L, luaH_setnum(L, t, p->bytecodeid), p);
+
+    // NOTE: Yes, we're using recursion for DFS but I do not know what is the
+    // data structure du jour that I should use for vector.
+    for (int i = 0; i < p->sizep; ++i)
+        pinproto(L, k, t, p->p[i]);
+}
+
+void lua_registerfkey(lua_State* L, const char* key, size_t keylen)
+{
+    // TODO: thread barriers?
+    int t = lua_type(L, 1);
+    luaL_argexpected(L, t != LUA_TFUNCTION, 1, "function");
+
+    struct Closure* c = clvalue(L->top - 1);
+    luaL_argexpected(L, c->isC, 1, "Luau function");
+
+    struct Proto* p = c->l.p;
+    lua_pop(L, 1);
+
+    TString* k = luaS_newlstr(L, key, keylen);
+    // NOTE: it would be really nice to know how many protos we have...
+    Table* lookup_tbl = luaH_new(L, 1, 0);
+
+    // Get global _PROTOS table (or create it if it doesn't exist)
+    lua_getfield(L, LUA_REGISTRYINDEX, "_PROTOS");
+    // Stack: _PROTOS|nil
+    if (lua_isnil(L, -1))
+    {
+        // Doesn't exist; create _PROTOS table
+        // Stack: nil
+        lua_pop(L, 1);
+        // Stack:
+        lua_createtable(L, 0, 1);
+        // Stack: _PROTOS
+        lua_pushvalue(L, -1);
+        // Stack: _PROTOS, _PROTOS
+        lua_setfield(L, LUA_REGISTRYINDEX, "_PROTOS");
+    }
+
+    // Stack: _PROTOS
+    Table* protos = hvalue(L->top - 1);
+    lua_pop(L, 1);
+    // Stack:
+
+    if (!ttisnil(luaH_getstr(protos, k)))
+    {
+        // _PROTOS[k] already exists
+        // TODO: throw an error?
+    }
+
+    sethvalue(L, luaH_setstr(L, protos, k), lookup_tbl);
+
+    // Populate lookup_tbl + install key in protos
+    pinproto(L, k, lookup_tbl, p);
+}
+
+void lua_unregisterfkey(lua_State* L, const char* key, size_t keylen)
+{
+    TString* k = luaS_newlstr(L, key, keylen);
+
+    // Get global _PROTOS table (or create it if it doesn't exist)
+    lua_getfield(L, LUA_REGISTRYINDEX, "_PROTOS");
+    // Stack: _PROTOS|nil
+    if (lua_isnil(L, -1))
+        // Doesn't exist; nothing to do here
+        return;
+
+    // Stack: _PROTOS
+    Table* protos = hvalue(L->top - 1);
+    lua_pop(L, 1);
+    // Stack:
+
+    setnilvalue(luaH_setstr(L, protos, k));
+}
+
+void lua_getfkey(lua_State* L)
+{
+    StkId arg = L->top - 1;
+    // TODO: thread barriers?
+    if (!ttisfunction(arg) || clvalue(arg)->isC)
+    {
+        setnilvalue(L->top - 1);
+        lua_pushstring(L, "expected Luau function");
+        return;
+    }
+
+    struct Proto* p = clvalue(arg)->l.p;
+
+    if (p->pinkey == NULL)
+    {
+        setnilvalue(L->top - 1);
+        lua_pushstring(L, "function is not pinned");
+        return;
+    }
+
+    setsvalue(L, L->top - 1, p->pinkey);
+    lua_pushinteger(L, p->bytecodeid);
+}
+
+void lua_lookupfkey(lua_State* L)
+{
+    api_check(L, 2 <= (L->top - L->base));
+    if (!ttisstring(L->top - 1) || !ttisnumber(L->top - 2))
+    {
+        // Key has to be a string
+        setnilvalue(L->top - 1);
+        return;
+    }
+
+    TString* k = tsvalue(L->top - 1);
+    int i = int(nvalue(L->top - 2));
+
+    L->top -= 2;
+
+    // Get global _PROTOS table (or create it if it doesn't exist)
+    lua_getfield(L, LUA_REGISTRYINDEX, "_PROTOS");
+    // Stack: _PROTOS|nil
+    if (lua_isnil(L, -1))
+    {
+        // _PROTOS table doesn't exist; return nil
+        // Stack: nil
+        return;
+    }
+
+    Table* protos = hvalue(L->top - 1);
+    lua_pop(L, 1);
+    // Stack:
+
+    const TValue* v = luaH_getstr(protos, k);
+    if (!ttistable(v))
+    {
+        // Proto table for k for doesn't exist/is wrong type somehow; return nil
+        lua_pushnil(L);
+        return;
+    }
+    Table* lookup_tbl = hvalue(v);
+    v = luaH_getnum(lookup_tbl, i);
+    if (ttype(v) != LUA_TPROTO)
+    {
+        lua_pushnil(L);
+        // Stack: nil
+        return;
+    }
+    Proto* p = &v->value.gc->p;
+    Closure* c = luaF_newLclosure(L, p->nups, L->gt, p);
+    setclvalue(L, L->top, c);
+    incr_top(L);
+    // Stack: closure
 }
